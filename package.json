@@ -1,7 +1,7 @@
 {
   "name": "tax-velasco-server",
-  "version": "7.0.0",
-  "description": "TAX VELASCO V7 CON IA + GRUPOS",
+  "version": "7.5.0",
+  "description": "TAX VELASCO V7.5 GEMINI AQ FIX",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
