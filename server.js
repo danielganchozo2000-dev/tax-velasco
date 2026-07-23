@@ -31,14 +31,14 @@ let isConnected = false;
 let sockInstance = null;
 let isStarting = false;
 
-// Token leido desde ENV o Google Sheet D8 - NUNCA hardcodear aqui
-const NUEVO_TOKEN_IA_USUARIO = process.env.MISTRAL_API_KEY || process.env.AI_TOKEN || '';
+// Token desde ENV seguro (Render) o Sheet D8 - tu nuevo Gemini AQ.
+const ENV_TOKEN = process.env.MISTRAL_API_KEY || process.env.GEMINI_API_KEY || process.env.AI_TOKEN || process.env.GOOGLE_API_KEY || '';
 
 let botIAConfig = {
     enabled: false,
     tipo: '',
-    token: NUEVO_TOKEN_IA_USUARIO || '',
-    modelo: 'pixtral-large-latest',
+    token: ENV_TOKEN || '',
+    modelo: 'gemini-1.5-flash',
     entrenamiento: '',
     gmt: 'GMT-5',
     blacklist: '',
@@ -47,8 +47,8 @@ let botIAConfig = {
 };
 
 console.log('=================================================');
-console.log('TAX VELASCO V7.3 - CON IA ENV + GRUPOS - FIX SECRET SCAN');
-console.log('Token IA desde ENV: ' + (NUEVO_TOKEN_IA_USUARIO ? 'SI ('+NUEVO_TOKEN_IA_USUARIO.length+' chars) prefix='+NUEVO_TOKEN_IA_USUARIO.substring(0,3) : 'NO - usando Sheet D8'));
+console.log('TAX VELASCO V7.5 - GEMINI AQ. FIX + GRUPOS 40s');
+console.log('ENV token:', ENV_TOKEN ? 'SI ('+ENV_TOKEN.length+' chars) prefix='+ENV_TOKEN.substring(0,3) : 'NO - se usara Sheet D8');
 console.log('Sheet:', GOOGLE_SHEET_URL.substring(0,80));
 console.log('=================================================');
 
@@ -76,9 +76,9 @@ async function reportarGruposAHoja(mensajesGrupos, overrideUrl = null) {
     const targetUrl = overrideUrl || sheetToNotify || GOOGLE_SHEET_URL;
     if (!targetUrl || targetUrl.includes('onrender.com')) return;
     try {
-        await axios.post(targetUrl, { op: 'grupos', mensajes: mensajesGrupos }, { headers: { 'Content-Type': 'application/json' }, timeout: 20000 });
+        await axios.post(targetUrl, { op: 'grupos', mensajes: mensajesGrupos }, { headers: { 'Content-Type': 'application/json' }, timeout: 40000 });
         console.log(`Grupos ${mensajesGrupos.length} reportados OK`);
-    } catch (e) { console.log('Error grupos', e.message); }
+    } catch (e) { console.log('Error grupos', e.message + ' - Sheet lento, aumentando timeout a 40s'); }
 }
 
 async function obtenerConfigDesdeHoja() {
@@ -90,26 +90,24 @@ async function obtenerConfigDesdeHoja() {
         if (data && data.configuracion) {
             const cfg = data.configuracion;
             botIAConfig.tipo = (cfg[7] && cfg[7][1] ? '' + cfg[7][1] : botIAConfig.tipo);
-            botIAConfig.modelo = (cfg[8] && cfg[8][7] ? '' + cfg[8][7] : botIAConfig.modelo) || 'gpt-4o-mini';
+            const sheetToken = cfg[7] && cfg[7][3] ? ('' + cfg[7][3]).trim() : '';
+            if (sheetToken) {
+                // Prioridad: si Sheet tiene token nuevo AQ. o AIza, usarlo. Si ENV ya tiene AQ., mantener ENV si Sheet es viejo sk-
+                const esSheetOpenAI = sheetToken.startsWith('sk-');
+                const tieneENV = !!ENV_TOKEN;
+                if (esSheetOpenAI && tieneENV) {
+                    console.log('Sheet tiene token OpenAI viejo, manteniendo ENV token AQ./Gemini');
+                } else {
+                    botIAConfig.token = sheetToken;
+                }
+            }
+            botIAConfig.modelo = (cfg[8] && cfg[8][7] ? '' + cfg[8][7] : botIAConfig.modelo) || 'gemini-1.5-flash';
             botIAConfig.entrenamiento = (cfg[8] && cfg[8][1] ? '' + cfg[8][1] : botIAConfig.entrenamiento);
             botIAConfig.gmt = (cfg[4] && cfg[4][1] ? '' + cfg[4][1] : 'GMT-5');
             botIAConfig.blacklist = data.blacklist || '';
             botIAConfig.whitelist = data.whitelist || '';
             botIAConfig.lastUpdate = new Date();
-            // Si el Sheet tiene token viejo sk-proj (OpenAI sin saldo), NO sobreescribir con ese, mantener AQ.
-            const sheetToken = cfg[7] && cfg[7][3] ? ('' + cfg[7][3]).trim() : '';
-            if (sheetToken) {
-                // Si sheetToken es el nuevo AQ o es diferente al viejo, actualizar. Si es sk-proj viejo y ya tenemos AQ, mantener AQ
-                const esSheetOpenAI = sheetToken.startsWith('sk-');
-                const esActualAQ = botIAConfig.token && botIAConfig.token.startsWith('AQ.');
-                if (!(esSheetOpenAI && esActualAQ)) {
-                    // Solo sobrescribir si no es el caso de OpenAI viejo sobre AQ nuevo
-                    botIAConfig.token = sheetToken;
-                } else {
-                    console.log('Sheet tiene token OpenAI viejo sk-... manteniendo nuevo token AQ.');
-                }
-            }
-            console.log(`Config IA cargada: tipo=${botIAConfig.tipo} modelo=${botIAConfig.modelo} token=${botIAConfig.token ? 'SI('+botIAConfig.token.length+' chars) prefix='+botIAConfig.token.substring(0,3) : 'NO'}`);
+            console.log(`Config IA cargada: tipo=${botIAConfig.tipo} modelo=${botIAConfig.modelo} token=SI(${botIAConfig.token.length} chars) prefix=${botIAConfig.token.substring(0,3)}`);
             return true;
         }
     } catch (e) {
@@ -130,34 +128,42 @@ async function callFindConversacion(numero, texto) {
 
 async function llamarIA(textoUsuario, numero) {
     const tipo = (botIAConfig.tipo || '').toUpperCase();
-    let token = botIAConfig.token || process.env.OPENAI_API_KEY || process.env.DEEPSEEK_API_KEY || process.env.GEMINI_API_KEY || '';
-    let modelo = botIAConfig.modelo || 'gpt-4o-mini';
-    const systemPrompt = botIAConfig.entrenamiento || 'Eres asistente util de TAX VELASCO. Responde breve y amable.';
+    let token = botIAConfig.token || ENV_TOKEN || '';
+    let modelo = botIAConfig.modelo || 'gemini-1.5-flash';
+    const systemPrompt = botIAConfig.entrenamiento || 'Eres asistente util de TAX VELASCO. Responde breve y amable en español.';
 
-    // Si el token empieza con AQ. es de MISTRAL
-    let esTokenMistralAQ = token.startsWith('AQ.');
-
-    if (!token) return null;
+    if (!token) {
+        console.log('IA sin token');
+        return null;
+    }
 
     try {
-        // ===== MISTRAL con token AQ. (tu nuevo token) =====
-        if (tipo.includes('MISTRAL') || esTokenMistralAQ || modelo.includes('pixtral') || modelo.includes('mistral')) {
+        // ===== GEMINI con token AQ. o AIza (tu caso actual) =====
+        if (tipo.includes('GEMINI') || token.startsWith('AQ.') || token.startsWith('AIza')) {
+            const gemModel = modelo.includes('gemini') ? modelo : 'gemini-1.5-flash';
+            // Endpoint correcto para API Keys nuevas AQ. y viejas AIza
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${encodeURIComponent(token)}`;
+            console.log(`Llamando GEMINI ${gemModel} con token ${token.substring(0,4)}... (${token.length} chars)`);
+            const resp = await axios.post(url, {
+                contents: [{ role: 'user', parts: [{ text: systemPrompt + '\n\nUsuario ('+numero+'): ' + textoUsuario }] }],
+                generationConfig: { temperature: 0.7, maxOutputTokens: 800 }
+            }, { headers: { 'Content-Type': 'application/json' }, timeout: 30000 });
+            const text = resp.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+            console.log('GEMINI OK, respuesta', text.substring(0,80));
+            return text;
+        }
+
+        // ===== MISTRAL con token AQ. (si lo usas como Mistral) =====
+        if (tipo.includes('MISTRAL') || modelo.includes('pixtral') || modelo.includes('mistral')) {
             const mistralModel = modelo.includes('pixtral') || modelo.includes('mistral') ? modelo : 'pixtral-large-latest';
-            // Mistral endpoint
             const resp = await axios.post('https://api.mistral.ai/v1/chat/completions', {
                 model: mistralModel,
                 messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: textoUsuario }],
-                temperature: 0.7
-            }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+            }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: 30000 });
             return resp.data?.choices?.[0]?.message?.content || '';
         }
 
-        if (tipo.includes('GEMINI')) {
-            const gemModel = modelo.includes('gemini') ? modelo : 'gemini-1.5-flash';
-            const url = `https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${token}`;
-            const resp = await axios.post(url, { contents: [{ role: 'user', parts: [{ text: systemPrompt + '\n\nUsuario: ' + textoUsuario }] }] }, { timeout: 30000 });
-            return resp.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-        }
+        // ===== DEEPSEEK =====
         if (tipo.includes('DEEPSEEK')) {
             const resp = await axios.post('https://api.deepseek.com/v1/chat/completions', {
                 model: modelo.includes('deepseek') ? modelo : 'deepseek-chat',
@@ -165,24 +171,25 @@ async function llamarIA(textoUsuario, numero) {
             }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: 30000 });
             return resp.data?.choices?.[0]?.message?.content || '';
         }
-        // OPENAI por defecto
+
+        // ===== OPENAI por defecto =====
         const resp = await axios.post('https://api.openai.com/v1/chat/completions', {
             model: modelo,
             messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: textoUsuario }],
             temperature: 0.7, max_tokens: 1000
         }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: 30000 });
         return resp.data?.choices?.[0]?.message?.content || '';
+
     } catch (e) {
         const status = e.response?.status;
         const data = e.response?.data;
-        console.log('Error IA:', status, JSON.stringify(data || {}).substring(0,500), e.message);
-        if (status === 401) {
-            const detalle = data?.message || data?.error?.message || 'No autorizado';
-            return `⚠️ TOKEN IA INVALIDO (${token.substring(0,10)}...): ${detalle}. Verifica en https://console.mistral.ai/api-keys - Tu token actual es ${token.length} chars, debe ser de Mistral. Si es de otro proveedor, cambia B8 a BOT API GPT / DEEPSEEK / GEMINI segun tu token.`;
+        console.log('Error IA:', status, JSON.stringify(data || {}).substring(0,800), e.message);
+        if (status === 400 && JSON.stringify(data).includes('API_KEY_INVALID')) {
+            return `⚠️ API KEY GEMINI INVALIDA (${token.substring(0,6)}...): Tu proyecto ${data?.error?.message || ''}. Ve a https://aistudio.google.com/app/apikey y genera una nueva key y ponla en D8 y en Render ENV GEMINI_API_KEY. Activa la API Generative Language en https://console.cloud.google.com/apis/library/generativelanguage.googleapis.com`;
         }
-        if (data?.error?.code === 'insufficient_quota') return '⚠️ Sin saldo OpenAI. Recarga en platform.openai.com/billing o cambia a DeepSeek/Gemini';
+        if (status === 401) return `⚠️ TOKEN IA INVALIDO (${token.substring(0,6)}... ${token.length} chars): ${data?.error?.message || data?.message || e.message}`;
         if (status === 429) return '⚠️ Rate limit IA, intenta en 30s';
-        return `⚠️ Error IA ${status}: ${(data?.message || e.message).substring(0,200)}`;
+        return null;
     }
 }
 
@@ -221,13 +228,12 @@ async function enviarMensajes(dataArray, appScriptUrl) {
     return resultados;
 }
 
-app.get('/', (req,res)=> res.send(`<h1>TAX VELASCO V7.0 IA</h1><p>Estado: ${isConnected ? 'CONECTADO' : 'QR'} | IA: ${botIAConfig.enabled ? botIAConfig.tipo : 'Desactivado'}</p><p><a href="/qr">QR</a> | <a href="/grupos">GRUPOS</a> | <a href="/bot-status">IA STATUS</a></p>`));
-app.get('/bot-status', (req,res)=> res.json({ conectado: isConnected, ia: botIAConfig }));
+app.get('/', (req,res)=> res.send(`<h1>TAX VELASCO V7.5 GEMINI AQ FIX</h1><p>Estado: ${isConnected ? 'CONECTADO' : 'QR'} | IA: ${botIAConfig.tipo || 'no activado'} | Token: ${botIAConfig.token ? botIAConfig.token.length+' chars '+botIAConfig.token.substring(0,3) : 'NO'}</p><p><a href="/qr">QR</a> | <a href="/grupos">GRUPOS</a></p>`));
 app.get('/qr', async (req,res)=>{
-    if (isConnected) return res.send('<h1>YA CONECTADO</h1>');
-    if (!qrCodeData) return res.send('<html><head><meta http-equiv="refresh" content="2"></head><body><h1>Generando QR...</h1></body></html>');
+    if (isConnected) return res.send('<h1>YA CONECTADO - V7.5</h1>');
+    if (!qrCodeData) return res.send('<html><head><meta http-equiv="refresh" content="2"></head><body><h1>Generando QR V7.5...</h1></body></html>');
     const qrImage = await QRCode.toDataURL(qrCodeData);
-    res.send(`<html><body style="text-align:center;background:#111;color:white"><h1>ESCANEA V7</h1><div style="background:white;padding:20px;display:inline-block;border-radius:20px;"><img src="${qrImage}" style="width:320px;height:320px;"/></div></body></html>`);
+    res.send(`<html><body style="text-align:center;background:#111;color:white"><h1>ESCANEA V7.5 GEMINI AQ</h1><div style="background:white;padding:20px;display:inline-block;border-radius:20px;"><img src="${qrImage}" style="width:320px;height:320px;"/></div></body></html>`);
 });
 app.get('/grupos', async (req,res)=>{
     try {
@@ -240,7 +246,6 @@ app.get('/grupos', async (req,res)=>{
 });
 
 app.post('/iniciarqr', async (req,res)=>{
-    console.log('--- /iniciarqr op:', req.body.op, ' ---');
     let incomingAppScript = req.body.app_script || '';
     if (incomingAppScript && incomingAppScript.includes('script.google.com') && !incomingAppScript.includes('onrender.com')) {
         sheetToNotify = incomingAppScript; GOOGLE_SHEET_URL = incomingAppScript;
@@ -251,8 +256,8 @@ app.post('/iniciarqr', async (req,res)=>{
             await obtenerConfigDesdeHoja();
             botIAConfig.enabled = true;
             if (req.body.tipobot) botIAConfig.tipo = req.body.tipobot;
-            console.log('✅ BOT IA ACTIVADO:', botIAConfig.tipo);
-            return res.json({ status: '0', message: `BOT IA ${botIAConfig.tipo} Activado` });
+            console.log('✅ BOT IA ACTIVADO:', botIAConfig.tipo, 'token', botIAConfig.token ? botIAConfig.token.substring(0,4)+'...' : 'NO');
+            return res.json({ status: '0', message: `BOT IA ${botIAConfig.tipo} Activado V7.5 GEMINI AQ` });
         }
         if (op === 'registermessage' && req.body.grupos) {
             if (!isConnected) return res.json({ status: 'error', message: 'No conectado' });
@@ -276,10 +281,10 @@ app.post('/iniciarqr', async (req,res)=>{
         }
         if (isConnected) {
             await reportarAHoja('CONECTADO', 'ya_conectado', sockInstance?.user?.id || '');
-            return res.json({ status: '0', message: 'Ya conectado' });
+            return res.json({ status: '0', message: 'Ya conectado V7.5' });
         }
         if (!isStarting) startBot();
-        return res.json({ status: '0', message: 'Iniciando QR...' });
+        return res.json({ status: '0', message: 'Iniciando QR V7.5...' });
     } catch (e) {
         return res.json({ status: 'error', message: e.message });
     }
@@ -291,7 +296,7 @@ app.post('/', async (req,res)=>{
     if (['iniciarqr','registermessage','grupos','obtenersheet','find_conversacion'].includes(op) || req.body.grupos || req.body.mensajes || req.body.tipobot) {
         req.url='/iniciarqr'; return app.handle(req,res);
     }
-    res.json({ status: '0', message: 'V7.0 online' });
+    res.json({ status: '0', message: 'V7.5 online GEMINI AQ FIX' });
 });
 
 async function startBot(){
@@ -317,11 +322,10 @@ async function startBot(){
                 const msg = lastDisconnect?.error?.message || '';
                 console.log(`Cerrada ${code} ${msg}`);
                 isConnected = false; qrCodeData = null; isStarting = false;
-                const isConflict = String(msg).toLowerCase().includes('conflict');
-                const isLoggedOut = code===DisconnectReason.loggedOut && !isConflict;
+                const isLoggedOut = code===DisconnectReason.loggedOut && !String(msg).toLowerCase().includes('conflict');
                 if (!isLoggedOut) setTimeout(()=>startBot(),5000);
             } else if (connection==='open') {
-                console.log('✅ CONECTADO - IA:', botIAConfig.enabled ? botIAConfig.tipo : 'dale Iniciar BOT');
+                console.log('✅ CONECTADO V7.5 - IA:', botIAConfig.enabled ? botIAConfig.tipo : 'dale Iniciar BOT');
                 isConnected = true; qrCodeData = null; isStarting = false;
                 await obtenerConfigDesdeHoja();
                 try {
@@ -369,4 +373,4 @@ async function startBot(){
     }
 }
 
-app.listen(PORT, '0.0.0.0', ()=>{ console.log(`V7.1 IA NUEVO TOKEN puerto ${PORT}`); startBot(); });
+app.listen(PORT, '0.0.0.0', ()=>{ console.log(`V7.5 GEMINI AQ puerto ${PORT}`); startBot(); });
