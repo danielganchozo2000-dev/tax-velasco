@@ -31,11 +31,14 @@ let isConnected = false;
 let sockInstance = null;
 let isStarting = false;
 
+// Token leido desde ENV o Google Sheet D8 - NUNCA hardcodear aqui
+const NUEVO_TOKEN_IA_USUARIO = process.env.MISTRAL_API_KEY || process.env.AI_TOKEN || '';
+
 let botIAConfig = {
     enabled: false,
     tipo: '',
-    token: '',
-    modelo: 'gpt-4o-mini',
+    token: NUEVO_TOKEN_IA_USUARIO || '',
+    modelo: 'pixtral-large-latest',
     entrenamiento: '',
     gmt: 'GMT-5',
     blacklist: '',
@@ -44,7 +47,8 @@ let botIAConfig = {
 };
 
 console.log('=================================================');
-console.log('TAX VELASCO V7.0 - CON IA + GRUPOS - RENDER FINAL');
+console.log('TAX VELASCO V7.3 - CON IA ENV + GRUPOS - FIX SECRET SCAN');
+console.log('Token IA desde ENV: ' + (NUEVO_TOKEN_IA_USUARIO ? 'SI ('+NUEVO_TOKEN_IA_USUARIO.length+' chars) prefix='+NUEVO_TOKEN_IA_USUARIO.substring(0,3) : 'NO - usando Sheet D8'));
 console.log('Sheet:', GOOGLE_SHEET_URL.substring(0,80));
 console.log('=================================================');
 
@@ -86,14 +90,26 @@ async function obtenerConfigDesdeHoja() {
         if (data && data.configuracion) {
             const cfg = data.configuracion;
             botIAConfig.tipo = (cfg[7] && cfg[7][1] ? '' + cfg[7][1] : botIAConfig.tipo);
-            botIAConfig.token = (cfg[7] && cfg[7][3] ? '' + cfg[7][3] : botIAConfig.token);
             botIAConfig.modelo = (cfg[8] && cfg[8][7] ? '' + cfg[8][7] : botIAConfig.modelo) || 'gpt-4o-mini';
             botIAConfig.entrenamiento = (cfg[8] && cfg[8][1] ? '' + cfg[8][1] : botIAConfig.entrenamiento);
             botIAConfig.gmt = (cfg[4] && cfg[4][1] ? '' + cfg[4][1] : 'GMT-5');
             botIAConfig.blacklist = data.blacklist || '';
             botIAConfig.whitelist = data.whitelist || '';
             botIAConfig.lastUpdate = new Date();
-            console.log(`Config IA cargada: tipo=${botIAConfig.tipo} modelo=${botIAConfig.modelo} token=${botIAConfig.token ? 'SI('+botIAConfig.token.length+' chars)' : 'NO'}`);
+            // Si el Sheet tiene token viejo sk-proj (OpenAI sin saldo), NO sobreescribir con ese, mantener AQ.
+            const sheetToken = cfg[7] && cfg[7][3] ? ('' + cfg[7][3]).trim() : '';
+            if (sheetToken) {
+                // Si sheetToken es el nuevo AQ o es diferente al viejo, actualizar. Si es sk-proj viejo y ya tenemos AQ, mantener AQ
+                const esSheetOpenAI = sheetToken.startsWith('sk-');
+                const esActualAQ = botIAConfig.token && botIAConfig.token.startsWith('AQ.');
+                if (!(esSheetOpenAI && esActualAQ)) {
+                    // Solo sobrescribir si no es el caso de OpenAI viejo sobre AQ nuevo
+                    botIAConfig.token = sheetToken;
+                } else {
+                    console.log('Sheet tiene token OpenAI viejo sk-... manteniendo nuevo token AQ.');
+                }
+            }
+            console.log(`Config IA cargada: tipo=${botIAConfig.tipo} modelo=${botIAConfig.modelo} token=${botIAConfig.token ? 'SI('+botIAConfig.token.length+' chars) prefix='+botIAConfig.token.substring(0,3) : 'NO'}`);
             return true;
         }
     } catch (e) {
@@ -118,9 +134,24 @@ async function llamarIA(textoUsuario, numero) {
     let modelo = botIAConfig.modelo || 'gpt-4o-mini';
     const systemPrompt = botIAConfig.entrenamiento || 'Eres asistente util de TAX VELASCO. Responde breve y amable.';
 
+    // Si el token empieza con AQ. es de MISTRAL
+    let esTokenMistralAQ = token.startsWith('AQ.');
+
     if (!token) return null;
 
     try {
+        // ===== MISTRAL con token AQ. (tu nuevo token) =====
+        if (tipo.includes('MISTRAL') || esTokenMistralAQ || modelo.includes('pixtral') || modelo.includes('mistral')) {
+            const mistralModel = modelo.includes('pixtral') || modelo.includes('mistral') ? modelo : 'pixtral-large-latest';
+            // Mistral endpoint
+            const resp = await axios.post('https://api.mistral.ai/v1/chat/completions', {
+                model: mistralModel,
+                messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: textoUsuario }],
+                temperature: 0.7
+            }, { headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }, timeout: 30000 });
+            return resp.data?.choices?.[0]?.message?.content || '';
+        }
+
         if (tipo.includes('GEMINI')) {
             const gemModel = modelo.includes('gemini') ? modelo : 'gemini-1.5-flash';
             const url = `https://generativelanguage.googleapis.com/v1beta/models/${gemModel}:generateContent?key=${token}`;
@@ -142,10 +173,16 @@ async function llamarIA(textoUsuario, numero) {
         }, { headers: { 'Authorization': `Bearer ${token}` }, timeout: 30000 });
         return resp.data?.choices?.[0]?.message?.content || '';
     } catch (e) {
-        console.log('Error IA:', e.response?.data || e.message);
-        if (e.response?.status === 401) return '⚠️ Token IA invalido';
-        if (e.response?.data?.error?.code === 'insufficient_quota') return '⚠️ Sin saldo OpenAI. Recarga en platform.openai.com/billing o cambia a DeepSeek/Gemini';
-        return null;
+        const status = e.response?.status;
+        const data = e.response?.data;
+        console.log('Error IA:', status, JSON.stringify(data || {}).substring(0,500), e.message);
+        if (status === 401) {
+            const detalle = data?.message || data?.error?.message || 'No autorizado';
+            return `⚠️ TOKEN IA INVALIDO (${token.substring(0,10)}...): ${detalle}. Verifica en https://console.mistral.ai/api-keys - Tu token actual es ${token.length} chars, debe ser de Mistral. Si es de otro proveedor, cambia B8 a BOT API GPT / DEEPSEEK / GEMINI segun tu token.`;
+        }
+        if (data?.error?.code === 'insufficient_quota') return '⚠️ Sin saldo OpenAI. Recarga en platform.openai.com/billing o cambia a DeepSeek/Gemini';
+        if (status === 429) return '⚠️ Rate limit IA, intenta en 30s';
+        return `⚠️ Error IA ${status}: ${(data?.message || e.message).substring(0,200)}`;
     }
 }
 
@@ -332,4 +369,4 @@ async function startBot(){
     }
 }
 
-app.listen(PORT, '0.0.0.0', ()=>{ console.log(`V7.0 IA puerto ${PORT}`); startBot(); });
+app.listen(PORT, '0.0.0.0', ()=>{ console.log(`V7.1 IA NUEVO TOKEN puerto ${PORT}`); startBot(); });
