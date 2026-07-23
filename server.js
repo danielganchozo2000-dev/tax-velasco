@@ -1,129 +1,128 @@
-
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
-const axios = require('axios');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const QRCode = require('qrcode');
-const P = require('pino');
+const axios = require('axios');
+const fs = require('fs');
 
 const app = express();
-app.use(express.json({limit: '50mb'}));
+const PORT = process.env.PORT || 10000;
+const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL || 'https://script.google.com/macros/s/AKfycbx09JJosvZk6x8koLPL5Y4u8mqe4pGo0KudMHXtDJXCjsBNHofJZ0ZqJ0PV-c8g/exec';
 
-const PORT = process.env.PORT || 3000;
+let qrCodeData = null;
+let isConnected = false;
+let sock = null;
 
-// TU GOOGLE SHEET - CAMBIALO AQUI
-const GOOGLE_SHEET_URL = process.env.GOOGLE_SHEET_URL || ""; // Pega tu URL de Apps Script aqui
-const NOMBRE_BOT = "TAX VELASCO";
+app.get('/', (req, res) => {
+    res.send(`
+        <h1 style="font-family: Arial; text-align:center; margin-top:50px;">🔥 TAX VELASCO BOT ONLINE 🔥</h1>
+        <p style="text-align:center;">Estado: ${isConnected ? '✅ CONECTADO' : '⏳ Esperando QR'}</p>
+        <p style="text-align:center;"><a href="/qr" style="font-size:20px; background:#25D366; color:white; padding:15px 30px; text-decoration:none; border-radius:10px;">VER QR AQUÍ</a></p>
+    `);
+});
 
-let qrActual = "";
-let estado = "DESCONECTADO";
-let sockGlobal = null;
-
-async function conectarWhatsApp(){
-  const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-  const sock = makeWASocket({
-    auth: state,
-    logger: P({level: 'silent'}),
-    browser: [NOMBRE_BOT, "Chrome", "1.0"],
-    printQRInTerminal: true
-  });
-  sockGlobal = sock;
-
-  sock.ev.on('creds.update', saveCreds);
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    if(qr){
-      qrActual = qr;
-      estado = "QR_GENERADO";
-      console.log("QR generado para TAX VELASCO");
-      // Enviar QR a Google Sheet
-      if(GOOGLE_SHEET_URL){
-        try{
-          await axios.post(GOOGLE_SHEET_URL, {op:"qr", qr: qr, session: "TAX_VELASCO_SESSION"});
-        }catch(e){}
-      }
+app.get('/qr', async (req, res) => {
+    if (isConnected) {
+        return res.send('<h1>✅ TAX VELASCO YA ESTÁ CONECTADO</h1><p>No necesitas escanear de nuevo.</p>');
     }
-    if(connection === 'close'){
-      const shouldReconnect = lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut;
-      estado = "DESCONECTADO";
-      console.log("Desconectado, reconectando:", shouldReconnect);
-      if(shouldReconnect) conectarWhatsApp();
-    } else if(connection === 'open'){
-      estado = "CONECTADO";
-      qrActual = "CONECTADO";
-      console.log("TAX VELASCO CONECTADO ✅");
-      if(GOOGLE_SHEET_URL){
-        try{
-          await axios.post(GOOGLE_SHEET_URL, {op:"qr", qr: "CONECTADO", session: "TAX_VELASCO_PERMANENTE_" + Date.now()});
-        }catch(e){}
-      }
+    if (!qrCodeData) {
+        return res.send(`
+            <html>
+            <head><meta http-equiv="refresh" content="3"></head>
+            <body style="text-align:center; font-family:Arial; margin-top:50px;">
+                <h1>⏳ Generando QR TAX VELASCO...</h1>
+                <p>Espera 5 segundos, se actualiza solo.</p>
+                <p>Si tarda, mira los Logs en Render.</p>
+            </body>
+            </html>
+        `);
     }
-  });
+    try {
+        const qrImage = await QRCode.toDataURL(qrCodeData);
+        res.send(`
+            <html>
+            <body style="text-align:center; font-family:Arial; background:#111; color:white;">
+                <h1 style="color:#25D366;">📲 ESCANEA - TAX VELASCO</h1>
+                <div style="background:white; padding:20px; display:inline-block; border-radius:20px;">
+                    <img src="${qrImage}" style="width:300px; height:300px;" />
+                </div>
+                <p>Abre WhatsApp > Dispositivos vinculados > Vincular dispositivo</p>
+                <p style="color:yellow;">Este QR se actualiza cada 30 segundos. Si no funciona, recarga la página.</p>
+                <script>setTimeout(()=>location.reload(), 30000);</script>
+            </body>
+            </html>
+        `);
+    } catch (e) {
+        res.send('Error generando QR: ' + e.message);
+    }
+});
 
-  // RECIBIR MENSAJES DE CLIENTES
-  sock.ev.on('messages.upsert', async (m) => {
-    try{
-      const msg = m.messages[0];
-      if(!msg.message || msg.key.fromMe) return;
-      const numero = msg.key.remoteJid;
-      const texto = msg.message.conversation || msg.message.extendedTextMessage?.text || "";
-      const esUbicacion = msg.message.locationMessage ? true : false;
-      
-      let documento = {};
-      if(esUbicacion){
-        documento = {latitud: msg.message.locationMessage.degreesLatitude, longitud: msg.message.locationMessage.degreesLongitude};
-      }
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    
+    sock = makeWASocket({
+        auth: state,
+        // NO usamos printQRInTerminal, por eso se quitó el error
+        browser: ['TAX VELASCO', 'Chrome', '1.0']
+    });
 
-      // Enviar a Google Sheet para que tu bot V5 responda
-      if(GOOGLE_SHEET_URL){
-        const payload = {
-          op: "find_conversacion",
-          numero: numero,
-          mensaje: esUbicacion ? "ubicacion_send" : texto,
-          documento: documento
-        };
-        try{
-          const resp = await axios.post(GOOGLE_SHEET_URL, payload);
-          const data = resp.data;
-          if(data && data.mensaje_salida){
-            await sock.sendMessage(numero, {text: data.mensaje_salida});
-            // Si hay reenvio al grupo
-            if(data.reenviar && data.numeroreenviar){
-              const grupoId = data.numeroreenviar.includes('@g.us') ? data.numeroreenviar : data.numeroreenviar + '@g.us';
-              await sock.sendMessage(grupoId, {text: data.reenviar});
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect, qr } = update;
+        
+        if (qr) {
+            console.log('QR Generado para TAX VELASCO');
+            qrCodeData = qr;
+        }
+
+        if (connection === 'close') {
+            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
+            console.log('Desconectado. Reconectando:', shouldReconnect);
+            isConnected = false;
+            if (shouldReconnect) {
+                setTimeout(startBot, 3000);
             }
-            // Si hay array de mensajes
-            if(data.mensajes && Array.isArray(data.mensajes)){
-              for(let mm of data.mensajes){
-                if(mm.mensaje_salida) await sock.sendMessage(numero, {text: mm.mensaje_salida});
-              }
+        } else if (connection === 'open') {
+            console.log('✅ TAX VELASCO CONECTADO CON ÉXITO');
+            isConnected = true;
+            qrCodeData = null;
+        }
+    });
+
+    sock.ev.on('messages.upsert', async ({ messages }) => {
+        try {
+            for (const msg of messages) {
+                if (!msg.message || msg.key.fromMe) continue;
+                const from = msg.key.remoteJid;
+                const text = msg.message.conversation || msg.message.extendedTextMessage?.text || '';
+                
+                console.log('Mensaje:', text);
+
+                // Aquí tu lógica de impuestos - guarda en Google Sheet
+                if (GOOGLE_SHEET_URL && text) {
+                    try {
+                        await axios.post(GOOGLE_SHEET_URL, {
+                            numero: from,
+                            mensaje: text,
+                            fecha: new Date().toISOString()
+                        });
+                    } catch (e) {
+                        console.log('Error Sheet:', e.message);
+                    }
+                }
+
+                // Respuesta de ejemplo TAX VELASCO
+                if (text.toLowerCase().includes('hola')) {
+                    await sock.sendMessage(from, { text: '¡Hola! 👋 Soy el Bot Oficial de *TAX VELASCO* 🧾💼\n\nEnvíame tu factura o escribe *AYUDA* para ver mis servicios.' });
+                }
             }
-          }
-        }catch(e){ console.log("Error Google Sheet:", e.message); }
-      }
-    }catch(e){ console.log(e); }
-  });
+        } catch (e) {
+            console.log('Error mensaje:', e);
+        }
+    });
 }
 
-// API PARA TU SHEET
-app.get('/', (req,res)=>{ res.send(`<h1>${NOMBRE_BOT} SERVER PROPIO ✅</h1><p>Estado: ${estado}</p><p><a href='/qr'>Ver QR</a></p>`); });
-
-app.get('/qr', async (req,res)=>{
-  if(estado === "CONECTADO") return res.send("<h1>TAX VELASCO CONECTADO ✅</h1><p>Sesión activa (TAX VELASCO)</p>");
-  if(!qrActual) return res.send("<h1>Generando QR...</h1><script>setTimeout(()=>location.reload(),2000)</script>");
-  try{
-    const qrImg = await QRCode.toDataURL(qrActual);
-    res.send(`<h1>TAX VELASCO - Escanea este QR</h1><img src='${qrImg}' width='350'/><p>Estado: ${estado}</p><p>Sesión: TAX VELASCO (Propio, no Anlusoft)</p><script>setTimeout(()=>location.reload(),20000)</script>`);
-  }catch(e){ res.send("Error QR"); }
+app.listen(PORT, () => {
+    console.log(`Servidor TAX VELASCO corriendo en puerto ${PORT}`);
+    startBot();
 });
-
-app.post('/iniciarqr', (req,res)=>{
-  res.json({status:'0', qr: qrActual, estado: estado});
-});
-
-app.post('/sendmessagewk', (req,res)=>{
-  // Compatible con tu Apps Script viejo
-  res.json({status:'0'});
-});
-
-app.listen(PORT, ()=>{ console.log(`Servidor ${NOMBRE_BOT} en puerto ${PORT}`); conectarWhatsApp(); });
