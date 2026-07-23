@@ -1,7 +1,7 @@
 {
   "name": "tax-velasco-server",
   "version": "7.0.0",
-  "description": "Bot Oficial TAX VELASCO",
+  "description": "TAX VELASCO V7 CON IA + GRUPOS",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
