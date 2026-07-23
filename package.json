@@ -1,7 +1,7 @@
 {
-  "name": "tax-velasco-bot",
-  "version": "6.0.0",
-  "description": "TAX VELASCO BOT - Render Produccion",
+  "name": "tax-velasco-server",
+  "version": "7.0.0",
+  "description": "Bot Oficial TAX VELASCO",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -12,8 +12,5 @@
     "express": "^4.19.2",
     "qrcode": "^1.5.3",
     "pino": "^9.3.2"
-  },
-  "engines": {
-    "node": ">=18.0.0"
   }
 }
